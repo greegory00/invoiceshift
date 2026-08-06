@@ -8,33 +8,26 @@
 </head>
 <body class="bg-gray-100 text-gray-800 min-h-screen flex flex-col">
 
-  <!-- Header -->
   <header class="bg-white border-b py-4 px-8 flex justify-between items-center shadow-sm">
     <div class="flex items-center space-x-2">
       <span class="text-2xl">⚡</span>
       <h1 class="text-xl font-bold text-indigo-600">InvoiceShift</h1>
     </div>
-    <div class="flex items-center space-x-3">
-      <span class="text-xs bg-amber-100 text-amber-800 font-semibold px-2.5 py-1 rounded-full border border-amber-200">
-        🚀 Beta Abierta v1.4
-      </span>
-      <button onclick="sendFeedback()" class="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg font-medium transition flex items-center gap-1">
-        💬 Dinos qué opinas
-      </button>
-    </div>
+    <span class="text-xs bg-amber-100 text-amber-800 font-semibold px-2.5 py-1 rounded-full border border-amber-200">
+      🚀 Beta Abierta v1.5
+    </span>
   </header>
 
   <main class="flex-1 max-w-6xl w-full mx-auto p-6 flex flex-col gap-6">
 
-    <!-- Banner Info -->
-    <div class="bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-center justify-between gap-3 text-indigo-900 text-xs">
+    <div class="bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-center justify-between text-indigo-900 text-xs">
       <div class="flex items-center gap-2">
         <span class="text-lg">✏️</span>
-        <p><strong>Modo Edición Activo:</strong> Puedes hacer clic en cualquier casilla de la tabla para modificar los valores a mano en cualquier momento.</p>
+        <p><strong>Modo Edición Activo:</strong> Puedes hacer clic en cualquier celda para corregir datos a mano si lo deseas.</p>
       </div>
     </div>
 
-    <!-- Drag and Drop Zone -->
+    <!-- Drag & Drop -->
     <div id="dropZone" class="border-2 border-dashed border-indigo-300 bg-white hover:bg-indigo-50/50 rounded-xl p-8 text-center cursor-pointer transition flex flex-col items-center justify-center min-h-[160px]">
       <svg class="w-10 h-10 text-indigo-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
@@ -45,8 +38,8 @@
     </div>
 
     <!-- Status Indicator -->
-    <div id="loadingStatus" class="hidden text-center text-xs text-indigo-600 font-semibold bg-indigo-50 py-2 rounded-lg border border-indigo-100">
-      ⏳ Procesando lote de facturas... Por favor espera.
+    <div id="loadingStatus" class="hidden text-center text-xs text-indigo-700 font-semibold bg-indigo-50 py-3 rounded-lg border border-indigo-200 shadow-sm">
+      <span id="loadingText">⏳ Procesando lote de facturas... Por favor espera.</span>
     </div>
 
     <!-- Results Table -->
@@ -98,6 +91,7 @@
     const tableFooter = document.getElementById('tableFooter');
     const btnDownload = document.getElementById('btnDownload');
     const loadingStatus = document.getElementById('loadingStatus');
+    const loadingText = document.getElementById('loadingText');
 
     const totalBaseEl = document.getElementById('totalBase');
     const totalIvaEl = document.getElementById('totalIva');
@@ -118,20 +112,22 @@
       if (e.target.files.length) handleFiles(e.target.files);
     });
 
-    // Función auxiliar para pausar la ejecución entre peticiones
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
     async function handleFiles(files) {
       loadingStatus.classList.remove('hidden');
+      const pdfFiles = Array.from(files).filter(f => f.type === 'application/pdf');
 
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        if (file.type === 'application/pdf') {
-          await processSingleFile(file);
-          // Pausa de 1.5 segundos entre archivos para evitar saturar límites de cuota
-          if (i < files.length - 1) {
-            await sleep(1500);
-          }
+      for (let i = 0; i < pdfFiles.length; i++) {
+        const file = pdfFiles[i];
+        loadingText.textContent = `⚡ Procesando "${file.name}" (${i + 1} de ${pdfFiles.length})...`;
+
+        await processSingleFile(file);
+
+        // Pausa de 3.5 segundos entre archivos para cumplir con la cuota gratuita de Google
+        if (i < pdfFiles.length - 1) {
+          loadingText.textContent = `⏳ Pausa de seguridad para la API (${i + 1} de ${pdfFiles.length})...`;
+          await sleep(3500);
         }
       }
 
@@ -156,10 +152,10 @@
               processedInvoices.push(result);
               renderTable();
             } else {
-              alert(`Error en "${file.name}": ${result.error}`);
+              alert(`Aviso en "${file.name}": La API de Google está saturada. Puedes volver a subir esta factura en un minuto.`);
             }
           } catch (err) {
-            alert(`Error al enviar el archivo "${file.name}"`);
+            alert(`Error de conexión con el servidor al procesar "${file.name}"`);
           }
           resolve();
         };
@@ -270,13 +266,6 @@
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-    }
-
-    function sendFeedback() {
-      const feedback = prompt("¡Gracias por probar la Beta! Dinos qué podemos mejorar:");
-      if (feedback) {
-        alert("¡Muchas gracias por tu mensaje!");
-      }
     }
   </script>
 </body>
