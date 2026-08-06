@@ -11,127 +11,61 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-function parseEuropeanNumber(str) {
-  if (!str) return 0;
-  // Limpia el texto dejando solo dígitos, comas y puntos
-  let clean = str.replace(/[^\d\.,]/g, '').trim();
-  if (clean.includes('.') && clean.includes(',')) {
-    clean = clean.replace(/\./g, '').replace(',', '.');
-  } else if (clean.includes(',')) {
-    clean = clean.replace(',', '.');
+async function extractInvoiceWithAI(pdfText) {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("No se ha configurado la variable GEMINI_API_KEY en Render.");
   }
-  return parseFloat(clean) || 0;
+
+  const prompt = `Analiza el texto de la siguiente factura y extrae únicamente los datos requeridos en formato JSON puro.
+
+Texto de la factura:
+"""
+${pdfText}
+"""
+
+Responde EXCLUSIVAMENTE con un objeto JSON válido sin texto adicional ni bloques markdown. La estructura debe ser exactamente esta:
+{
+  "invoiceNumber": "Número o serie de la factura. Si no existe o no es claro, usa 'S/N'",
+  "date": "Fecha de emisión en formato DD/MM/YYYY. Si no existe, usa la fecha actual",
+  "baseAmount": 0.00,
+  "ivaAmount": 0.00,
+  "amount": 0.00
 }
 
-function parseInvoiceText(rawText, fileName) {
-  // Imprimir texto extraído en los Logs de Render para diagnóstico
-  console.log(`\n=================== INICIO PDF: ${fileName} ===================`);
-  console.log(rawText);
-  console.log(`=================== FIN PDF: ${fileName} ===================\n`);
+Reglas estrictas:
+1. baseAmount, ivaAmount y amount deben ser números decimales (ejemplo: 45.50).
+2. "amount" es el IMPORTE TOTAL A PAGAR de la factura. No confundas el porcentaje de impuesto (ej. 21%) con el importe total.
+3. Asegúrate de que baseAmount + ivaAmount sea igual a amount. Si la factura no desglosa el IVA, calcula baseAmount = amount / 1.21 e ivaAmount = amount - baseAmount.`;
 
-  // Dividir el documento en líneas independientes
-  const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
-  let invoiceNumber = 'S/N';
-  let date = new Date().toISOString().split('T')[0];
-  let amount = 0;
-  let baseAmount = 0;
-  let ivaAmount = 0;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }]
+    })
+  });
 
-  // 1. BÚSQUEDA DE TOTAL POR LÍNEAS
-  const totalKeywords = ['total factura', 'total a pagar', 'importe total', 'liquido a pagar', 'total eur', 'total €', 'total general', 'total doc', 'total'];
+  const apiData = await response.json();
+
+  if (!response.ok) {
+    throw new Error(apiData.error?.message || 'Error al comunicarse con la API de IA.');
+  }
+
+  const rawText = apiData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+  const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
   
-  for (let i = 0; i < lines.length; i++) {
-    const lineLower = lines[i].toLowerCase();
-
-    // Comprobar si la línea contiene alguna palabra clave de Total
-    const hasTotalKeyword = totalKeywords.some(kw => lineLower.includes(kw));
-
-    if (hasTotalKeyword) {
-      // Extraer números de la misma línea
-      const numbersInLine = lines[i].match(/(?:€|\b)\s*([\d]{1,6}[,\.]\d{2})\s*(?:€|\b)/g);
-      if (numbersInLine && numbersInLine.length > 0) {
-        // Tomar el último número de la línea (habitualmente el importe)
-        const lastNum = parseEuropeanNumber(numbersInLine[numbersInLine.length - 1]);
-        if (lastNum > 0 && lastNum < 100000) {
-          amount = lastNum;
-          break;
-        }
-      } else if (i + 1 < lines.length) {
-        // Si el importe está en la línea siguiente
-        const numbersInNextLine = lines[i + 1].match(/(?:€|\b)\s*([\d]{1,6}[,\.]\d{2})\s*(?:€|\b)/g);
-        if (numbersInNextLine && numbersInNextLine.length > 0) {
-          const nextNum = parseEuropeanNumber(numbersInNextLine[0]);
-          if (nextNum > 0 && nextNum < 100000) {
-            amount = nextNum;
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  // 2. BÚSQUEDA DE BASE IMPONIBLE POR LÍNEAS
-  for (let i = 0; i < lines.length; i++) {
-    const lineLower = lines[i].toLowerCase();
-    if (lineLower.includes('base imponible') || lineLower.includes('subtotal') || lineLower.includes('b.i.')) {
-      const numbers = lines[i].match(/(?:€|\b)\s*([\d]{1,6}[,\.]\d{2})\s*(?:€|\b)/g);
-      if (numbers && numbers.length > 0) {
-        baseAmount = parseEuropeanNumber(numbers[numbers.length - 1]);
-        break;
-      }
-    }
-  }
-
-  // 3. BÚSQUEDA DE NÚMERO DE FACTURA
-  for (let i = 0; i < lines.length; i++) {
-    const lineLower = lines[i].toLowerCase();
-    if (lineLower.includes('factura') || lineLower.includes('nº') || lineLower.includes('num')) {
-      const match = lines[i].match(/(?:nº|factura|num|doc|ref)[\s\:\.\-]*([A-Z0-9\/\-_]{3,25})/i);
-      if (match && match[1] && /\d/.test(match[1])) {
-        const candidate = match[1].trim();
-        if (!/^\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4}$/.test(candidate)) {
-          invoiceNumber = candidate;
-          break;
-        }
-      }
-    }
-  }
-
-  // 4. BÚSQUEDA DE FECHA
-  for (let i = 0; i < lines.length; i++) {
-    const dateMatch = lines[i].match(/(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/);
-    if (dateMatch && dateMatch[1]) {
-      date = dateMatch[1];
-      break;
-    }
-  }
-
-  // RECONSTRUCCIÓN Y COHERENCIA MATEMÁTICA
-  if (amount === 0) {
-    // Si no se encontró por línea, tomar el valor más alto con formato decimal del documento
-    const allNumbers = rawText.match(/(?:€|\b)\s*([\d]{1,6}[,\.]\d{2})\s*(?:€|\b)/g);
-    if (allNumbers && allNumbers.length > 0) {
-      const validNumbers = allNumbers.map(n => parseEuropeanNumber(n)).filter(v => v > 0 && v < 50000);
-      if (validNumbers.length > 0) {
-        amount = Math.max(...validNumbers);
-      }
-    }
-  }
-
-  if (baseAmount === 0 && amount > 0) {
-    baseAmount = amount / 1.21;
-    ivaAmount = amount - baseAmount;
-  } else if (baseAmount > 0 && amount > 0) {
-    ivaAmount = amount - baseAmount;
-  }
+  const parsed = JSON.parse(cleanJson);
 
   return {
-    invoiceNumber,
-    date,
-    baseAmount: parseFloat(baseAmount.toFixed(2)),
-    ivaAmount: parseFloat(Math.abs(ivaAmount).toFixed(2)),
-    amount: parseFloat(amount.toFixed(2))
+    invoiceNumber: parsed.invoiceNumber || 'S/N',
+    date: parsed.date || new Date().toISOString().split('T')[0],
+    baseAmount: parseFloat((parsed.baseAmount || 0).toFixed(2)),
+    ivaAmount: parseFloat((parsed.ivaAmount || 0).toFixed(2)),
+    amount: parseFloat((parsed.amount || 0).toFixed(2))
   };
 }
 
@@ -167,7 +101,8 @@ app.post('/api/parse-pdf', async (req, res) => {
       });
     }
 
-    const extractedData = parseInvoiceText(pdfData.text, fileName || 'factura.pdf');
+    // Extracción inteligente mediante IA
+    const extractedData = await extractInvoiceWithAI(pdfData.text);
 
     return res.json({
       success: true,
@@ -197,5 +132,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 ¡Servidor InvoiceShift activo en puerto ${PORT}!`);
+  console.log(`\n🚀 ¡Servidor InvoiceShift (Motor IA) activo en puerto ${PORT}!`);
 });
