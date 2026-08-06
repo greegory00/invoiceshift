@@ -39,7 +39,8 @@ Reglas estrictas:
 2. "amount" es el IMPORTE TOTAL A PAGAR de la factura. No confundas el porcentaje de impuesto (ej. 21%) con el importe total.
 3. Asegúrate de que baseAmount + ivaAmount sea igual a amount. Si la factura no desglosa el IVA, calcula baseAmount = amount / 1.21 e ivaAmount = amount - baseAmount.`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  // URL actualizada al modelo Gemini 2.5 Flash
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -101,7 +102,6 @@ app.post('/api/parse-pdf', async (req, res) => {
       });
     }
 
-    // Extracción inteligente mediante IA
     const extractedData = await extractInvoiceWithAI(pdfData.text);
 
     return res.json({
@@ -132,5 +132,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 ¡Servidor InvoiceShift (Motor IA) activo en puerto ${PORT}!`);
+  console.log(`\n🚀 ¡Servidor InvoiceShift (Motor IA Gemini 2.5) activo en puerto ${PORT}!`);
 });
