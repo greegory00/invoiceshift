@@ -22,9 +22,9 @@ function parseEuropeanNumber(str) {
   return parseFloat(clean) || 0;
 }
 
-// Extracción local de respaldo si la API de IA agota su cuota
-function parseInvoiceLocal(text) {
-  const cleanText = text.replace(/\r/g, ' ');
+// EXTRACTOR LOCAL DE RESPALDO (Orientado a palabras clave, evita IBANs)
+function parseInvoiceLocal(rawText) {
+  const cleanText = rawText.replace(/\r/g, ' ');
   const lines = cleanText.split(/\n/).map(l => l.trim()).filter(l => l.length > 0);
 
   let invoiceNumber = 'S/N';
@@ -33,37 +33,113 @@ function parseInvoiceLocal(text) {
   let baseAmount = 0;
   let ivaAmount = 0;
 
-  // Fecha
-  const dateMatch = cleanText.match(/(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/);
-  if (dateMatch) date = dateMatch[1];
-
-  // Nº Documento
-  const docMatch = cleanText.match(/(?:nº|factura|num|doc|ref)[\s\:\.\-]*([A-Z0-9\/\-_]{3,25})/i);
-  if (docMatch && docMatch[1] && /\d/.test(docMatch[1])) {
-    invoiceNumber = docMatch[1].trim();
-  }
-
-  // Importe Total
-  const candidates = cleanText.match(/(?:€|\b)\s*([\d]{1,6}[,\.]\d{2})\s*(?:€|\b)/g);
-  if (candidates && candidates.length > 0) {
-    const validNumbers = candidates.map(n => parseEuropeanNumber(n)).filter(v => v > 0 && v < 50000);
-    if (validNumbers.length > 0) {
-      amount = Math.max(...validNumbers);
+  // 1. FECHA
+  const dateRegexes = [
+    /(?:fecha|date|f\.\s*factura|emisión)\s*[:\.\-]?\s*(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/i,
+    /(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/,
+    /(\d{4}[\/\.-]\d{1,2}[\/\.-]\d{1,2})/
+  ];
+  for (const reg of dateRegexes) {
+    const m = cleanText.match(reg);
+    if (m && m[1]) {
+      date = m[1];
+      break;
     }
   }
 
-  baseAmount = amount / 1.21;
-  ivaAmount = amount - baseAmount;
+  // 2. NÚMERO DE DOCUMENTO
+  const docRegexes = [
+    /(?:nº\s*factura|factura\s*nº|nº\s*doc|nº\s*fra|num\.\s*factura|factura\s*num|nº\s*ticket|ref\.?)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{3,30})/i,
+    /(?:factura|invoice)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{4,25})/i
+  ];
+  for (const reg of docRegexes) {
+    const m = cleanText.match(reg);
+    if (m && m[1]) {
+      const cand = m[1].trim();
+      const isDate = /^\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4}$/.test(cand);
+      const isForbidden = /TOTAL|FECHA|IMPORTE|DOCUMENTO|CLIENTE|PAGINA/i.test(cand);
+      if (!isDate && !isForbidden && /\d/.test(cand)) {
+        invoiceNumber = cand;
+        break;
+      }
+    }
+  }
+
+  // 3. EXTRAER TOTAL BUSCANDO LA PALABRA "TOTAL" (No el número más alto)
+  const totalKeywords = ['total factura', 'total a pagar', 'importe total', 'liquido a pagar', 'total eur', 'total €', 'total general', 'total doc'];
+  
+  for (const line of lines) {
+    const lLower = line.toLowerCase();
+    for (const kw of totalKeywords) {
+      if (lLower.includes(kw)) {
+        const numMatch = line.match(/([\d]{1,5}[,\.]\d{2})/g);
+        if (numMatch && numMatch.length > 0) {
+          const val = parseEuropeanNumber(numMatch[numMatch.length - 1]);
+          if (val > 0) {
+            amount = val;
+            break;
+          }
+        }
+      }
+    }
+    if (amount > 0) break;
+  }
+
+  // Búsqueda secundaria si no estaba en la misma línea
+  if (amount === 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const lLower = lines[i].toLowerCase();
+      if (lLower === 'total' || lLower.startsWith('total ') || lLower.endsWith(' total')) {
+        const searchBlock = lines[i] + ' ' + (lines[i+1] || '');
+        const numMatch = searchBlock.match(/([\d]{1,5}[,\.]\d{2})/g);
+        if (numMatch && numMatch.length > 0) {
+          const val = parseEuropeanNumber(numMatch[numMatch.length - 1]);
+          if (val > 0) {
+            amount = val;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // 4. BASE IMPONIBLE E IVA
+  const baseMatch = cleanText.match(/(?:base\s*imponible|subtotal|b\.i\.)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i);
+  if (baseMatch && baseMatch[1]) {
+    baseAmount = parseEuropeanNumber(baseMatch[1]);
+  }
+
+  const ivaMatch = cleanText.match(/(?:cuota\s*iva|importe\s*iva|iva)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i);
+  if (ivaMatch && ivaMatch[1]) {
+    const candidateIva = parseEuropeanNumber(ivaMatch[1]);
+    if (candidateIva < amount) {
+      ivaAmount = candidateIva;
+    }
+  }
+
+  // COHERENCIA MATEMÁTICA
+  if (amount > 0 && baseAmount === 0) {
+    if (ivaAmount > 0) {
+      baseAmount = amount - ivaAmount;
+    } else {
+      baseAmount = amount / 1.21;
+      ivaAmount = amount - baseAmount;
+    }
+  } else if (baseAmount > 0 && amount === 0) {
+    ivaAmount = baseAmount * 0.21;
+    amount = baseAmount + ivaAmount;
+  }
 
   return {
     invoiceNumber,
     date,
     baseAmount: parseFloat(baseAmount.toFixed(2)),
-    ivaAmount: parseFloat(ivaAmount.toFixed(2)),
+    ivaAmount: parseFloat(Math.abs(ivaAmount).toFixed(2)),
     amount: parseFloat(amount.toFixed(2))
   };
 }
 
+// IA CON MODELOS EN CASCADA
 async function extractInvoiceWithAI(pdfText) {
   const apiKey = process.env.GEMINI_API_KEY;
 
@@ -71,45 +147,68 @@ async function extractInvoiceWithAI(pdfText) {
     throw new Error("Sin API Key configurada.");
   }
 
-  const prompt = `Analiza la siguiente factura y extrae en JSON puro:
+  const prompt = `Analiza la siguiente factura y extrae ÚNICAMENTE los datos en JSON puro.
+
+Texto:
+"""
+${pdfText}
+"""
+
+Responde EXCLUSIVAMENTE en formato JSON:
 {
-  "invoiceNumber": "Número o serie. Si no existe, 'S/N'",
+  "invoiceNumber": "Número o serie de factura. Si no existe, 'S/N'",
   "date": "Fecha DD/MM/YYYY",
   "baseAmount": 0.00,
   "ivaAmount": 0.00,
   "amount": 0.00
 }
 
-Texto:
-"""
-${pdfText}
-"""`;
+Reglas:
+1. amount es el IMPORTE TOTAL FINAL A PAGAR. No confundas el 21% de IVA con el importe total.
+2. baseAmount + ivaAmount debe ser igual a amount.
+3. Si la factura no desglosa el IVA, calcula baseAmount = amount / 1.21 e ivaAmount = amount - baseAmount.`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+  // Lista de modelos a intentar en orden de preferencia
+  const modelsToTry = [
+    'gemini-1.5-flash',
+    'gemini-2.0-flash-exp',
+    'gemini-1.5-pro'
+  ];
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-  });
+  let lastError = null;
 
-  const apiData = await response.json();
+  for (const modelName of modelsToTry) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      });
 
-  if (!response.ok) {
-    throw new Error(apiData.error?.message || 'Límite de cuota o error de API.');
+      const apiData = await response.json();
+
+      if (response.ok && apiData.candidates?.[0]?.content?.parts?.[0]?.text) {
+        const rawText = apiData.candidates[0].content.parts[0].text;
+        const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(cleanJson);
+
+        return {
+          invoiceNumber: parsed.invoiceNumber || 'S/N',
+          date: parsed.date || new Date().toISOString().split('T')[0],
+          baseAmount: parseFloat((parsed.baseAmount || 0).toFixed(2)),
+          ivaAmount: parseFloat((parsed.ivaAmount || 0).toFixed(2)),
+          amount: parseFloat((parsed.amount || 0).toFixed(2))
+        };
+      } else {
+        lastError = apiData.error?.message || `Error en modelo ${modelName}`;
+      }
+    } catch (e) {
+      lastError = e.message;
+    }
   }
 
-  const rawText = apiData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-  const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-  const parsed = JSON.parse(cleanJson);
-
-  return {
-    invoiceNumber: parsed.invoiceNumber || 'S/N',
-    date: parsed.date || new Date().toISOString().split('T')[0],
-    baseAmount: parseFloat((parsed.baseAmount || 0).toFixed(2)),
-    ivaAmount: parseFloat((parsed.ivaAmount || 0).toFixed(2)),
-    amount: parseFloat((parsed.amount || 0).toFixed(2))
-  };
+  throw new Error(`Los modelos de IA no respondieron: ${lastError}`);
 }
 
 async function processPdfBuffer(buffer) {
@@ -136,16 +235,14 @@ app.post('/api/parse-pdf', async (req, res) => {
     const pdfData = await processPdfBuffer(buffer);
 
     if (!pdfData || !pdfData.text || pdfData.text.trim().length === 0) {
-      return res.status(400).json({ error: 'El PDF no contiene texto legible.' });
+      return res.status(400).json({ error: 'El PDF es un escáner/imagen sin texto interno.' });
     }
 
     let extractedData;
     try {
-      // Intentar procesar con IA
       extractedData = await extractInvoiceWithAI(pdfData.text);
     } catch (aiError) {
-      console.warn(`⚠️ Cuota de IA excedida o error en API para ${fileName}. Usando motor de respaldo local.`);
-      // Si la IA falla o supera la cuota, conmuta al motor local
+      console.warn(`⚠️ Error de IA en ${fileName}: ${aiError.message}. Usando motor local de respaldo.`);
       extractedData = parseInvoiceLocal(pdfData.text);
     }
 
