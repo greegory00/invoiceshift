@@ -25,17 +25,17 @@ function parseEuropeanNumber(str) {
 function parseInvoiceText(text) {
   const cleanText = text.replace(/\r/g, ' ');
 
-  // 1. NÚMERO DE DOCUMENTO (Con validaciones estrictas)
+  // 1. EXTRAER NÚMERO DE DOCUMENTO
   const invoiceNumRegexes = [
-    /(?:num(?:ero)?\s*factura|nº\s*factura|factura\s*nº|factura\s*num|factura\s*n°|nº\s*doc|nº\s*de\s*factura|fra\.\s*nº|factura\s*número)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{2,30})/i,
-    /(?:nº\s*factura\s*simplificada|factura\s*simplificada\s*nº|nº\s*ticket)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{2,30})/i,
+    /(?:serie\/nº|serie\/numero|nº\s*fra|nº\s*factura|factura\s*nº|factura\s*num|factura\s*n°|nº\s*doc|nº\s*documento|nº\s*de\s*factura|fra\.\s*nº|factura\s*número)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{2,30})/i,
+    /(?:nº\s*factura\s*simplificada|factura\s*simplificada\s*nº|nº\s*ticket|nº\s*recibo|ref\.?|referencia)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{2,30})/i,
     /(?:factura|invoice)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{3,25})/i
   ];
 
   const forbiddenWords = [
     'TOTAL', 'FECHA', 'IMPORTE', 'CLIENTE', 'PAGINA', 'FACTURA', 'BASE', 
     'DE', 'PUEDES', 'DOCUMENTO', 'UMENTO', 'NUMERO', 'NÚMERO', 'Nº', 
-    'CONCEPTO', 'PROVEEDOR', 'TITULAR', 'VENCIMIENTO', 'PAGO', 'SUMINISTRO'
+    'CONCEPTO', 'PROVEEDOR', 'TITULAR', 'VENCIMIENTO', 'PAGO', 'SUMINISTRO', 'DESCRIPCION'
   ];
 
   let invoiceNumber = 'S/N';
@@ -45,20 +45,21 @@ function parseInvoiceText(text) {
       const candidate = match[1].trim();
       const upperCand = candidate.toUpperCase();
 
+      // Descartar si es una fecha (ej. 12/08/2025)
+      const isDate = /^\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4}$/.test(candidate);
       const isForbidden = forbiddenWords.some(word => upperCand === word || upperCand.startsWith(word));
       const hasDigits = /\d/.test(candidate);
 
-      // Exigimos que tenga al menos un número o formato con guiones/barras
-      if (!isForbidden && candidate.length >= 2 && (hasDigits || candidate.includes('-') || candidate.includes('/'))) {
+      if (!isDate && !isForbidden && candidate.length >= 2 && (hasDigits || candidate.includes('-') || candidate.includes('/'))) {
         invoiceNumber = candidate;
         break;
       }
     }
   }
 
-  // 2. FECHA (Exige años de 4 dígitos)
+  // 2. EXTRAER FECHA
   const dateRegexes = [
-    /(?:fecha|date|f\.\s*factura|fecha\s*emisión|fecha\s*expedición)\s*[:\.\-]?\s*(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/i,
+    /(?:fecha|date|f\.\s*factura|fecha\s*emisión|fecha\s*expedición|fecha\s*factura)\s*[:\.\-]?\s*(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/i,
     /(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/,
     /(\d{4}[\/\.-]\d{1,2}[\/\.-]\d{1,2})/
   ];
@@ -72,10 +73,10 @@ function parseInvoiceText(text) {
     }
   }
 
-  // 3. IMPORTE TOTAL
+  // 3. EXTRAER IMPORTE TOTAL
   const totalRegexes = [
     /(?:total\s*factura|total\s*a\s*pagar|importe\s*total|liquido\s*a\s*pagar|total\s*eur|total\s*€|total\s*doc|total\s*general)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i,
-    /(?:total|importe)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i
+    /(?:total|importe\s*cobrado|total\s*cobrado)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i
   ];
 
   let amount = 0;
@@ -83,66 +84,61 @@ function parseInvoiceText(text) {
     const match = cleanText.match(regex);
     if (match && match[1]) {
       const val = parseEuropeanNumber(match[1]);
-      if (val > 0) {
+      // Ignorar valores desorbitados capturados por error (mayores a 50.000€ salvo que sea explícito)
+      if (val > 0 && val < 100000) {
         amount = val;
         break;
       }
     }
   }
 
-  // Si no se encuentra etiqueta "Total", se busca el valor numérico más alto del texto
+  // Si no se encuentra etiqueta de Total, buscar números con formato de moneda válidos (evitando IBANs y cuentas)
   if (amount === 0) {
-    const allNumbers = cleanText.match(/[\d]{1,6}[,\.]\d{2}/g);
-    if (allNumbers && allNumbers.length > 0) {
-      const parsedValues = allNumbers.map(n => parseEuropeanNumber(n)).filter(v => v > 0);
+    const candidates = cleanText.match(/(?:€|\b)\s*([\d]{1,5}[,\.]\d{2})\s*(?:€|\b)/g);
+    if (candidates && candidates.length > 0) {
+      const parsedValues = candidates
+        .map(n => parseEuropeanNumber(n))
+        .filter(v => v > 0 && v < 50000); // Filtro de seguridad anti-IBAN
+
       if (parsedValues.length > 0) {
         amount = Math.max(...parsedValues);
       }
     }
   }
 
-  // 4. BASE IMPONIBLE
+  // 4. EXTRAER BASE IMPONIBLE
   const baseRegex = /(?:base\s*imponible|subtotal|b\.i\.|base\s*imp\.|base)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i;
   const baseMatch = cleanText.match(baseRegex);
   let baseAmount = baseMatch ? parseEuropeanNumber(baseMatch[1]) : 0;
 
-  // 5. CUOTA DE IVA
+  // 5. EXTRAER CUOTA DE IVA
   const ivaRegex = /(?:cuota\s*iva|importe\s*iva|iva\s*\d{1,2}%|iva)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i;
   const ivaMatch = cleanText.match(ivaRegex);
   let ivaAmount = ivaMatch ? parseEuropeanNumber(ivaMatch[1]) : 0;
 
-  // LÓGICA DE CONTROL Y CORRECCIÓN MATEMÁTICA
+  // LÓGICA DE RECONSTRUCCIÓN Y COHERENCIA MATEMÁTICA
   if (baseAmount === 0 && amount > 0) {
-    if (ivaAmount > 0) {
+    if (ivaAmount > 0 && ivaAmount < amount) {
       baseAmount = amount - ivaAmount;
     } else {
       baseAmount = amount / 1.21;
       ivaAmount = amount - baseAmount;
     }
-  } else if (ivaAmount === 0 && amount > 0 && baseAmount > 0) {
+  } else if (ivaAmount === 0 && amount > 0 && baseAmount > 0 && amount >= baseAmount) {
     ivaAmount = amount - baseAmount;
   }
 
-  // Corrección si la Base es mayor que el Total (ej. Total mal capturado)
+  // Ajuste si la Base supera al Total (falso positivo de la Base)
   if (baseAmount > amount && amount > 0) {
-    if (ivaAmount > 0) {
-      amount = baseAmount + ivaAmount;
-    } else {
-      baseAmount = amount / 1.21;
-      ivaAmount = amount - baseAmount;
-    }
-  }
-
-  // Asegura que el IVA nunca sea negativo
-  if (ivaAmount < 0) {
-    ivaAmount = Math.abs(ivaAmount);
+    baseAmount = amount / 1.21;
+    ivaAmount = amount - baseAmount;
   }
 
   return {
     invoiceNumber,
     date,
     baseAmount: parseFloat(baseAmount.toFixed(2)),
-    ivaAmount: parseFloat(ivaAmount.toFixed(2)),
+    ivaAmount: parseFloat(Math.abs(ivaAmount).toFixed(2)),
     amount: parseFloat(amount.toFixed(2))
   };
 }
