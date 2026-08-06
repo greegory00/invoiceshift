@@ -1,53 +1,205 @@
 const express = require('express');
+const pdfParseModule = require('pdf-parse');
 const path = require('path');
+const fs = require('fs');
+
+const pdfParse = typeof pdfParseModule === 'function' ? pdfParseModule : (pdfParseModule.default || pdfParseModule);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware para parsear JSON y servir archivos estáticos
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-/**
- * Parser de texto de facturas mediante RegEx de alto rendimiento
- * @param {string} text - Texto extraído de la factura
- * @returns {Object} Datos estructurados de la factura
- */
-function parseInvoiceText(text) {
-  // Patrones de búsqueda comunes para facturas
-  const totalRegex = /(?:total|importe\s*total|amount\s*due|suma)\s*:?\s*[$€£]?\s*(\d+[\.,]\d{2})/i;
-  const dateRegex = /(?:fecha|date)\s*:?\s*(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4})/i;
-  const invoiceNumRegex = /(?:factura|invoice|nº|num)\s*:?\s*([A-Z0-9\-_]+)/i;
+function parseEuropeanNumber(str) {
+  if (!str) return 0;
+  let clean = str.replace(/[^\d\.,]/g, '').trim();
+  if (clean.includes('.') && clean.includes(',')) {
+    clean = clean.replace(/\./g, '').replace(',', '.');
+  } else if (clean.includes(',')) {
+    clean = clean.replace(',', '.');
+  }
+  return parseFloat(clean) || 0;
+}
 
-  const totalMatch = text.match(totalRegex);
-  const dateMatch = text.match(dateRegex);
-  const numMatch = text.match(invoiceNumRegex);
+function parseInvoiceText(text) {
+  const cleanText = text.replace(/\r/g, ' ');
+
+  // 1. EXTRAER NÚMERO DE DOCUMENTO (Con filtros anti-palabras y anti-fechas)
+  const invoiceNumRegexes = [
+    /(?:serie\/nº|serie\/numero|nº\s*fra|nº\s*factura|factura\s*nº|factura\s*num|factura\s*n°|nº\s*doc|nº\s*documento|nº\s*de\s*factura|fra\.\s*nº|factura\s*número)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{2,30})/i,
+    /(?:nº\s*factura\s*simplificada|factura\s*simplificada\s*nº|nº\s*ticket|nº\s*recibo|ref\.?|referencia)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{2,30})/i,
+    /(?:factura|invoice)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{3,25})/i
+  ];
+
+  const forbiddenWords = [
+    'TOTAL', 'FECHA', 'IMPORTE', 'CLIENTE', 'PAGINA', 'FACTURA', 'BASE', 
+    'DE', 'PUEDES', 'DOCUMENTO', 'UMENTO', 'NUMERO', 'NÚMERO', 'Nº', 
+    'CONCEPTO', 'PROVEEDOR', 'TITULAR', 'VENCIMIENTO', 'PAGO', 'SUMINISTRO', 'DESCRIPCION'
+  ];
+
+  let invoiceNumber = 'S/N';
+  for (const regex of invoiceNumRegexes) {
+    const match = cleanText.match(regex);
+    if (match && match[1]) {
+      const candidate = match[1].trim();
+      const upperCand = candidate.toUpperCase();
+
+      const isDate = /^\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4}$/.test(candidate);
+      const isForbidden = forbiddenWords.some(word => upperCand === word || upperCand.startsWith(word));
+      const hasDigits = /\d/.test(candidate);
+
+      if (!isDate && !isForbidden && candidate.length >= 2 && (hasDigits || candidate.includes('-') || candidate.includes('/'))) {
+        invoiceNumber = candidate;
+        break;
+      }
+    }
+  }
+
+  // 2. EXTRAER FECHA (Años de 4 dígitos prioritarios)
+  const dateRegexes = [
+    /(?:fecha|date|f\.\s*factura|fecha\s*emisión|fecha\s*expedición|fecha\s*factura)\s*[:\.\-]?\s*(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/i,
+    /(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/,
+    /(\d{4}[\/\.-]\d{1,2}[\/\.-]\d{1,2})/
+  ];
+
+  let date = new Date().toISOString().split('T')[0];
+  for (const regex of dateRegexes) {
+    const match = cleanText.match(regex);
+    if (match && match[1]) {
+      date = match[1];
+      break;
+    }
+  }
+
+  // 3. EXTRAER IMPORTE TOTAL (Filtro anti-IBAN y códigos largos)
+  const totalRegexes = [
+    /(?:total\s*factura|total\s*a\s*pagar|importe\s*total|liquido\s*a\s*pagar|total\s*eur|total\s*€|total\s*doc|total\s*general)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i,
+    /(?:total|importe\s*cobrado|total\s*cobrado)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i
+  ];
+
+  let amount = 0;
+  for (const regex of totalRegexes) {
+    const match = cleanText.match(regex);
+    if (match && match[1]) {
+      const val = parseEuropeanNumber(match[1]);
+      if (val > 0 && val < 100000) {
+        amount = val;
+        break;
+      }
+    }
+  }
+
+  if (amount === 0) {
+    const candidates = cleanText.match(/(?:€|\b)\s*([\d]{1,5}[,\.]\d{2})\s*(?:€|\b)/g);
+    if (candidates && candidates.length > 0) {
+      const parsedValues = candidates
+        .map(n => parseEuropeanNumber(n))
+        .filter(v => v > 0 && v < 50000);
+
+      if (parsedValues.length > 0) {
+        amount = Math.max(...parsedValues);
+      }
+    }
+  }
+
+  // 4. EXTRAER BASE IMPONIBLE
+  const baseRegex = /(?:base\s*imponible|subtotal|b\.i\.|base\s*imp\.|base)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i;
+  const baseMatch = cleanText.match(baseRegex);
+  let baseAmount = baseMatch ? parseEuropeanNumber(baseMatch[1]) : 0;
+
+  // 5. EXTRAER CUOTA DE IVA
+  const ivaRegex = /(?:cuota\s*iva|importe\s*iva|iva\s*\d{1,2}%|iva)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i;
+  const ivaMatch = cleanText.match(ivaRegex);
+  let ivaAmount = ivaMatch ? parseEuropeanNumber(ivaMatch[1]) : 0;
+
+  // COHERENCIA Y RECONSTRUCCIÓN MATEMÁTICA
+  if (baseAmount === 0 && amount > 0) {
+    if (ivaAmount > 0 && ivaAmount < amount) {
+      baseAmount = amount - ivaAmount;
+    } else {
+      baseAmount = amount / 1.21;
+      ivaAmount = amount - baseAmount;
+    }
+  } else if (ivaAmount === 0 && amount > 0 && baseAmount > 0 && amount >= baseAmount) {
+    ivaAmount = amount - baseAmount;
+  }
+
+  if (baseAmount > amount && amount > 0) {
+    baseAmount = amount / 1.21;
+    ivaAmount = amount - baseAmount;
+  }
 
   return {
-    invoiceNumber: numMatch ? numMatch[1] : 'N/A',
-    date: dateMatch ? dateMatch[1] : new Date().toISOString().split('T')[0],
-    amount: totalMatch ? parseFloat(totalMatch[1].replace(',', '.')) : 0.00,
-    rawLength: text.length,
-    processedAt: new Date().toISOString()
+    invoiceNumber,
+    date,
+    baseAmount: parseFloat(baseAmount.toFixed(2)),
+    ivaAmount: parseFloat(Math.abs(ivaAmount).toFixed(2)),
+    amount: parseFloat(amount.toFixed(2))
   };
 }
 
-// Endpoint principal del parser
-app.post('/api/parse', (req, res) => {
+async function processPdfBuffer(buffer) {
   try {
-    const { content } = req.body;
+    return await pdfParse(buffer);
+  } catch (err) {
+    if (err.message && err.message.includes("without 'new'")) {
+      return await new pdfParse(buffer);
+    }
+    throw err;
+  }
+}
 
-    if (!content || typeof content !== 'string') {
-      return res.status(400).json({ error: 'El contenido del documento es obligatorio.' });
+app.post('/api/parse-pdf', async (req, res) => {
+  try {
+    const { fileBase64, fileName } = req.body;
+
+    if (!fileBase64) {
+      return res.status(400).json({ error: 'No se recibió ningún archivo.' });
     }
 
-    const parsedData = parseInvoiceText(content);
-    return res.json({ success: true, data: parsedData });
+    const base64Data = fileBase64.includes(',') 
+      ? fileBase64.split(',')[1] 
+      : fileBase64;
+
+    const buffer = Buffer.from(base64Data, 'base64');
+    const pdfData = await processPdfBuffer(buffer);
+
+    if (!pdfData || !pdfData.text || pdfData.text.trim().length === 0) {
+      return res.status(400).json({ 
+        error: 'El PDF es un escáner/imagen sin texto interno.' 
+      });
+    }
+
+    const extractedData = parseInvoiceText(pdfData.text);
+
+    return res.json({
+      success: true,
+      fileName: fileName || 'factura.pdf',
+      data: extractedData
+    });
+
   } catch (error) {
-    return res.status(500).json({ error: 'Error procesando el documento.' });
+    console.error('❌ ERROR EN SERVIDOR:', error.message);
+    return res.status(500).json({ 
+      error: `Error al procesar: ${error.message}` 
+    });
+  }
+});
+
+app.get('/', (req, res) => {
+  const publicPath = path.join(__dirname, 'public', 'index.html');
+  const rootPath = path.join(__dirname, 'index.html');
+  
+  if (fs.existsSync(publicPath)) {
+    res.sendFile(publicPath);
+  } else if (fs.existsSync(rootPath)) {
+    res.sendFile(rootPath);
+  } else {
+    res.send("Error: No se encuentra index.html.");
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`[InvoiceShift MVP] Servidor ejecutándose en http://localhost:${PORT}`);
+  console.log(`\n🚀 ¡Servidor InvoiceShift activo en puerto ${PORT}!`);
 });
