@@ -8,6 +8,23 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Función para reintentar peticiones con pausa cuando la API reporta saturación (HTTP 429)
+async function fetchWithRetry(url, options, retries = 3, delayMs = 5000) {
+  for (let i = 0; i < retries; i++) {
+    const response = await fetch(url, options);
+    
+    // Si no hay problema de límite de tasa, devolvemos la respuesta directamente
+    if (response.status !== 429) {
+      return response;
+    }
+
+    console.warn(`⚠️ Límite de la API alcanzado. Esperando ${delayMs / 1000}s para reintentar (Intento ${i + 1} de ${retries})...`);
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+    delayMs *= 1.5; // Incrementa el tiempo de espera en cada reintento
+  }
+  return await fetch(url, options);
+}
+
 async function extractInvoiceWithAI(base64Data) {
   const apiKey = process.env.GEMINI_API_KEY;
 
@@ -17,24 +34,23 @@ async function extractInvoiceWithAI(base64Data) {
 
   const cleanBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
 
-  const prompt = `Analiza visualmente esta factura PDF y extrae con precisión los datos en formato JSON puro.
+  const prompt = `Analiza visualmente esta factura PDF y extrae los datos en formato JSON puro.
 
 Estructura requerida:
 {
-  "invoiceNumber": "Número o serie de factura. Si no existe, 'S/N'",
-  "date": "Fecha de emisión DD/MM/YYYY",
+  "invoiceNumber": "Número o serie de la factura. Si no existe, 'S/N'",
+  "date": "Fecha de emisión en formato DD/MM/YYYY",
   "baseAmount": 0.00,
   "ivaAmount": 0.00,
   "amount": 0.00
 }
 
-Reglas:
-1. "amount" DEBE ser el importe TOTAL FINAL A PAGAR.
+Reglas estrictas:
+1. "amount" DEBE ser el importe TOTAL A PAGAR.
 2. baseAmount + ivaAmount = amount.
-3. Responde únicamente con el JSON puro.`;
+3. Responde únicamente con el objeto JSON puro.`;
 
-  // Probamos alternativamente con ambos modelos
-  const models = ['gemini-1.5-flash', 'gemini-2.0-flash'];
+  const models = ['gemini-2.0-flash', 'gemini-1.5-flash'];
   let lastError = null;
 
   for (const model of models) {
@@ -52,7 +68,7 @@ Reglas:
         generationConfig: { responseMimeType: "application/json" }
       };
 
-      const response = await fetch(url, {
+      const response = await fetchWithRetry(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -79,7 +95,7 @@ Reglas:
     }
   }
 
-  throw new Error(lastError || 'Límite de cuota alcanzado.');
+  throw new Error(`Saturación de API: ${lastError}`);
 }
 
 app.post('/api/parse-pdf', async (req, res) => {
@@ -99,8 +115,8 @@ app.post('/api/parse-pdf', async (req, res) => {
     });
 
   } catch (error) {
-    console.error(`❌ ERROR PROCESANDO ${req.body.fileName || 'archivo'}:`, error.message);
-    return res.status(429).json({ error: error.message });
+    console.error(`❌ ERROR EN ${req.body.fileName || 'archivo'}:`, error.message);
+    return res.status(500).json({ error: error.message });
   }
 });
 
@@ -113,5 +129,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 ¡Servidor InvoiceShift activo en puerto ${PORT}!`);
+  console.log(`\n🚀 ¡Servidor InvoiceShift (Con Reintentos de Cuota) activo en puerto ${PORT}!`);
 });
