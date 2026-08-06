@@ -16,7 +16,7 @@
     </div>
     <div class="flex items-center space-x-3">
       <span class="text-xs bg-amber-100 text-amber-800 font-semibold px-2.5 py-1 rounded-full border border-amber-200">
-        🚀 Beta Abierta v1.5
+        🚀 Beta Abierta v1.4
       </span>
       <button onclick="sendFeedback()" class="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg font-medium transition flex items-center gap-1">
         💬 Dinos qué opinas
@@ -30,7 +30,7 @@
     <div class="bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-indigo-900 text-xs">
       <div class="flex items-center gap-2">
         <span class="text-lg">🎉</span>
-        <p><strong>¡Estás probando la Versión Beta Gratuita!</strong> Procesa todas las facturas que quieras de forma ilimitada. Como trabajamos con facturas de proveedores muy distintos, revisa siempre las filas marcadas en amarillo antes de exportar: son campos estimados automáticamente. Puedes editar cualquier celda haciendo clic sobre ella.</p>
+        <p><strong>¡Estás probando la Versión Beta Gratuita!</strong> Procesa todas las facturas que quieras de forma ilimitada. Ayúdanos a mejorar diciéndonos si algún formato se te resiste.</p>
       </div>
     </div>
 
@@ -49,9 +49,6 @@
       ⏳ Procesando facturas... Por favor espera.
     </div>
 
-    <!-- Error log for skipped/failed files -->
-    <div id="errorLog" class="hidden text-xs bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 space-y-1"></div>
-
     <!-- Results Table -->
     <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
       <div class="p-4 border-b flex justify-between items-center bg-gray-50">
@@ -65,7 +62,6 @@
         <table class="w-full text-left border-collapse">
           <thead>
             <tr class="bg-gray-100 text-gray-600 text-xs uppercase tracking-wider border-b">
-              <th class="p-3"></th>
               <th class="p-3">Archivo</th>
               <th class="p-3">Nº Doc</th>
               <th class="p-3">Fecha</th>
@@ -77,13 +73,13 @@
           </thead>
           <tbody id="resultsTable" class="text-sm divide-y">
             <tr>
-              <td colspan="8" class="p-4 text-center text-gray-400 text-xs">Aún no se han cargado documentos.</td>
+              <td colspan="7" class="p-4 text-center text-gray-400 text-xs">Aún no se han cargado documentos.</td>
             </tr>
           </tbody>
           <!-- Live Totals Footer -->
           <tfoot id="tableFooter" class="hidden bg-indigo-50/50 font-semibold border-t text-sm">
             <tr>
-              <td colspan="4" class="p-3 text-indigo-900">ACUMULADO TOTAL:</td>
+              <td colspan="3" class="p-3 text-indigo-900">ACUMULADO TOTAL:</td>
               <td id="totalBase" class="p-3 text-gray-700">0.00 €</td>
               <td id="totalIva" class="p-3 text-gray-700">0.00 €</td>
               <td id="totalAmount" class="p-3 text-emerald-700 font-bold">0.00 €</td>
@@ -103,7 +99,6 @@
     const tableFooter = document.getElementById('tableFooter');
     const btnDownload = document.getElementById('btnDownload');
     const loadingStatus = document.getElementById('loadingStatus');
-    const errorLog = document.getElementById('errorLog');
 
     const totalBaseEl = document.getElementById('totalBase');
     const totalIvaEl = document.getElementById('totalIva');
@@ -124,30 +119,13 @@
       if (e.target.files.length) handleFiles(e.target.files);
     });
 
-    function isPdf(file) {
-      // Algunos navegadores/SO no rellenan file.type al arrastrar archivos,
-      // así que comprobamos también la extensión como respaldo.
-      return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-    }
-
-    function logError(msg) {
-      errorLog.classList.remove('hidden');
-      const line = document.createElement('div');
-      line.textContent = `⚠️ ${msg}`;
-      errorLog.appendChild(line);
-    }
-
     async function handleFiles(files) {
       loadingStatus.classList.remove('hidden');
-      errorLog.classList.add('hidden');
-      errorLog.innerHTML = '';
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        if (isPdf(file)) {
+        if (file.type === 'application/pdf') {
           await processSingleFile(file);
-        } else {
-          logError(`"${file.name}" se ignoró porque no parece un PDF.`);
         }
       }
 
@@ -172,15 +150,11 @@
               processedInvoices.push(result);
               renderTable();
             } else {
-              logError(`"${file.name}": ${result.error}`);
+              alert(`Error en "${file.name}": ${result.error}`);
             }
           } catch (err) {
-            logError(`No se pudo enviar "${file.name}" al servidor.`);
+            alert(`Error al enviar el archivo "${file.name}"`);
           }
-          resolve();
-        };
-        reader.onerror = () => {
-          logError(`No se pudo leer el archivo "${file.name}".`);
           resolve();
         };
       });
@@ -190,7 +164,7 @@
       if (processedInvoices.length === 0) {
         resultsTable.innerHTML = `
           <tr>
-            <td colspan="8" class="p-4 text-center text-gray-400 text-xs">Aún no se han cargado documentos.</td>
+            <td colspan="7" class="p-4 text-center text-gray-400 text-xs">Aún no se han cargado documentos.</td>
           </tr>`;
         tableFooter.classList.add('hidden');
         btnDownload.disabled = true;
@@ -206,22 +180,14 @@
         sumIva += item.data.ivaAmount;
         sumTotal += item.data.amount;
 
-        const warnings = item.data.warnings || [];
-        const hasWarnings = warnings.length > 0;
-        const rowClass = hasWarnings ? 'bg-amber-50 hover:bg-amber-100' : 'hover:bg-gray-50';
-        const warningIcon = hasWarnings
-          ? `<span title="${warnings.join(' | ').replace(/"/g, '&quot;')}" class="cursor-help text-amber-500">⚠️</span>`
-          : `<span class="text-emerald-500" title="Sin avisos">✓</span>`;
-
         return `
-          <tr class="${rowClass} transition" data-index="${index}">
-            <td class="p-3 text-center">${warningIcon}</td>
-            <td class="p-3 font-medium text-gray-900">${escapeHtml(item.fileName)}</td>
-            <td class="p-3 font-mono editable" contenteditable="true" data-field="invoiceNumber" onblur="updateField(${index}, 'invoiceNumber', this.textContent)">${escapeHtml(item.data.invoiceNumber)}</td>
-            <td class="p-3 editable" contenteditable="true" data-field="date" onblur="updateField(${index}, 'date', this.textContent)">${escapeHtml(item.data.date)}</td>
-            <td class="p-3 text-gray-600 editable" contenteditable="true" data-field="baseAmount" onblur="updateNumericField(${index}, 'baseAmount', this.textContent)">${item.data.baseAmount.toFixed(2)}</td>
-            <td class="p-3 text-gray-600 editable" contenteditable="true" data-field="ivaAmount" onblur="updateNumericField(${index}, 'ivaAmount', this.textContent)">${item.data.ivaAmount.toFixed(2)}</td>
-            <td class="p-3 font-semibold text-emerald-600 editable" contenteditable="true" data-field="amount" onblur="updateNumericField(${index}, 'amount', this.textContent)">${item.data.amount.toFixed(2)}</td>
+          <tr class="hover:bg-gray-50 transition">
+            <td class="p-3 font-medium text-gray-900">${item.fileName}</td>
+            <td class="p-3 font-mono">${item.data.invoiceNumber}</td>
+            <td class="p-3">${item.data.date}</td>
+            <td class="p-3 text-gray-600">${item.data.baseAmount.toFixed(2)} €</td>
+            <td class="p-3 text-gray-600">${item.data.ivaAmount.toFixed(2)} €</td>
+            <td class="p-3 font-semibold text-emerald-600">${item.data.amount.toFixed(2)} €</td>
             <td class="p-3 text-center">
               <button onclick="removeInvoice(${index})" class="text-red-500 hover:text-red-700 hover:bg-red-50 p-1 rounded transition" title="Eliminar">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -233,6 +199,7 @@
         `;
       }).join('');
 
+      // Actualizar Totales del Pie de Tabla
       totalBaseEl.textContent = `${sumBase.toFixed(2)} €`;
       totalIvaEl.textContent = `${sumIva.toFixed(2)} €`;
       totalAmountEl.textContent = `${sumTotal.toFixed(2)} €`;
@@ -241,43 +208,21 @@
       btnDownload.disabled = false;
     }
 
-    function escapeHtml(str) {
-      const div = document.createElement('div');
-      div.textContent = str == null ? '' : String(str);
-      return div.innerHTML;
-    }
-
-    function updateField(index, field, value) {
-      if (!processedInvoices[index]) return;
-      processedInvoices[index].data[field] = value.trim();
-    }
-
-    function updateNumericField(index, field, value) {
-      if (!processedInvoices[index]) return;
-      const normalized = value.replace(',', '.').replace(/[^\d.\-]/g, '');
-      const num = parseFloat(normalized);
-      processedInvoices[index].data[field] = isNaN(num) ? 0 : num;
-      renderTable(); // recalcula los totales acumulados tras la edición manual
-    }
-
     function removeInvoice(index) {
       processedInvoices.splice(index, 1);
       renderTable();
     }
 
     function downloadCSV() {
-      let csvContent = "\uFEFF";
+      let csvContent = "\uFEFF"; 
       csvContent += "Archivo;Nº Doc;Fecha;Base Imponible (€);IVA (€);Importe Total (€)\n";
 
       processedInvoices.forEach(i => {
-        const baseStr = Number(i.data.baseAmount).toFixed(2).replace('.', ',');
-        const ivaStr = Number(i.data.ivaAmount).toFixed(2).replace('.', ',');
-        const totalStr = Number(i.data.amount).toFixed(2).replace('.', ',');
-        const safeFileName = String(i.fileName).replace(/"/g, '""');
-        const safeInvoiceNumber = String(i.data.invoiceNumber).replace(/"/g, '""');
-        const safeDate = String(i.data.date).replace(/"/g, '""');
+        const baseStr = i.data.baseAmount.toFixed(2).replace('.', ',');
+        const ivaStr = i.data.ivaAmount.toFixed(2).replace('.', ',');
+        const totalStr = i.data.amount.toFixed(2).replace('.', ',');
 
-        csvContent += `"${safeFileName}";"${safeInvoiceNumber}";"${safeDate}";${baseStr};${ivaStr};${totalStr}\n`;
+        csvContent += `"${i.fileName}";"${i.data.invoiceNumber}";"${i.data.date}";${baseStr};${ivaStr};${totalStr}\n`;
       });
 
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -288,7 +233,6 @@
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      URL.revokeObjectURL(url);
     }
 
     function sendFeedback() {
