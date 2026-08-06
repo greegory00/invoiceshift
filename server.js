@@ -13,6 +13,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 function parseEuropeanNumber(str) {
   if (!str) return 0;
+  // Limpia el texto dejando solo dígitos, comas y puntos
   let clean = str.replace(/[^\d\.,]/g, '').trim();
   if (clean.includes('.') && clean.includes(',')) {
     clean = clean.replace(/\./g, '').replace(',', '.');
@@ -22,111 +23,106 @@ function parseEuropeanNumber(str) {
   return parseFloat(clean) || 0;
 }
 
-function parseInvoiceText(text) {
-  const cleanText = text.replace(/\r/g, ' ');
+function parseInvoiceText(rawText, fileName) {
+  // Imprimir texto extraído en los Logs de Render para diagnóstico
+  console.log(`\n=================== INICIO PDF: ${fileName} ===================`);
+  console.log(rawText);
+  console.log(`=================== FIN PDF: ${fileName} ===================\n`);
 
-  // 1. EXTRAER NÚMERO DE DOCUMENTO (Con filtros anti-palabras y anti-fechas)
-  const invoiceNumRegexes = [
-    /(?:serie\/nº|serie\/numero|nº\s*fra|nº\s*factura|factura\s*nº|factura\s*num|factura\s*n°|nº\s*doc|nº\s*documento|nº\s*de\s*factura|fra\.\s*nº|factura\s*número)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{2,30})/i,
-    /(?:nº\s*factura\s*simplificada|factura\s*simplificada\s*nº|nº\s*ticket|nº\s*recibo|ref\.?|referencia)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{2,30})/i,
-    /(?:factura|invoice)\s*[:\.\-]?\s*([A-Z0-9\/\-_]{3,25})/i
-  ];
-
-  const forbiddenWords = [
-    'TOTAL', 'FECHA', 'IMPORTE', 'CLIENTE', 'PAGINA', 'FACTURA', 'BASE', 
-    'DE', 'PUEDES', 'DOCUMENTO', 'UMENTO', 'NUMERO', 'NÚMERO', 'Nº', 
-    'CONCEPTO', 'PROVEEDOR', 'TITULAR', 'VENCIMIENTO', 'PAGO', 'SUMINISTRO', 'DESCRIPCION'
-  ];
+  // Dividir el documento en líneas independientes
+  const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
 
   let invoiceNumber = 'S/N';
-  for (const regex of invoiceNumRegexes) {
-    const match = cleanText.match(regex);
-    if (match && match[1]) {
-      const candidate = match[1].trim();
-      const upperCand = candidate.toUpperCase();
+  let date = new Date().toISOString().split('T')[0];
+  let amount = 0;
+  let baseAmount = 0;
+  let ivaAmount = 0;
 
-      const isDate = /^\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4}$/.test(candidate);
-      const isForbidden = forbiddenWords.some(word => upperCand === word || upperCand.startsWith(word));
-      const hasDigits = /\d/.test(candidate);
+  // 1. BÚSQUEDA DE TOTAL POR LÍNEAS
+  const totalKeywords = ['total factura', 'total a pagar', 'importe total', 'liquido a pagar', 'total eur', 'total €', 'total general', 'total doc', 'total'];
+  
+  for (let i = 0; i < lines.length; i++) {
+    const lineLower = lines[i].toLowerCase();
 
-      if (!isDate && !isForbidden && candidate.length >= 2 && (hasDigits || candidate.includes('-') || candidate.includes('/'))) {
-        invoiceNumber = candidate;
+    // Comprobar si la línea contiene alguna palabra clave de Total
+    const hasTotalKeyword = totalKeywords.some(kw => lineLower.includes(kw));
+
+    if (hasTotalKeyword) {
+      // Extraer números de la misma línea
+      const numbersInLine = lines[i].match(/(?:€|\b)\s*([\d]{1,6}[,\.]\d{2})\s*(?:€|\b)/g);
+      if (numbersInLine && numbersInLine.length > 0) {
+        // Tomar el último número de la línea (habitualmente el importe)
+        const lastNum = parseEuropeanNumber(numbersInLine[numbersInLine.length - 1]);
+        if (lastNum > 0 && lastNum < 100000) {
+          amount = lastNum;
+          break;
+        }
+      } else if (i + 1 < lines.length) {
+        // Si el importe está en la línea siguiente
+        const numbersInNextLine = lines[i + 1].match(/(?:€|\b)\s*([\d]{1,6}[,\.]\d{2})\s*(?:€|\b)/g);
+        if (numbersInNextLine && numbersInNextLine.length > 0) {
+          const nextNum = parseEuropeanNumber(numbersInNextLine[0]);
+          if (nextNum > 0 && nextNum < 100000) {
+            amount = nextNum;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // 2. BÚSQUEDA DE BASE IMPONIBLE POR LÍNEAS
+  for (let i = 0; i < lines.length; i++) {
+    const lineLower = lines[i].toLowerCase();
+    if (lineLower.includes('base imponible') || lineLower.includes('subtotal') || lineLower.includes('b.i.')) {
+      const numbers = lines[i].match(/(?:€|\b)\s*([\d]{1,6}[,\.]\d{2})\s*(?:€|\b)/g);
+      if (numbers && numbers.length > 0) {
+        baseAmount = parseEuropeanNumber(numbers[numbers.length - 1]);
         break;
       }
     }
   }
 
-  // 2. EXTRAER FECHA (Años de 4 dígitos prioritarios)
-  const dateRegexes = [
-    /(?:fecha|date|f\.\s*factura|fecha\s*emisión|fecha\s*expedición|fecha\s*factura)\s*[:\.\-]?\s*(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/i,
-    /(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/,
-    /(\d{4}[\/\.-]\d{1,2}[\/\.-]\d{1,2})/
-  ];
+  // 3. BÚSQUEDA DE NÚMERO DE FACTURA
+  for (let i = 0; i < lines.length; i++) {
+    const lineLower = lines[i].toLowerCase();
+    if (lineLower.includes('factura') || lineLower.includes('nº') || lineLower.includes('num')) {
+      const match = lines[i].match(/(?:nº|factura|num|doc|ref)[\s\:\.\-]*([A-Z0-9\/\-_]{3,25})/i);
+      if (match && match[1] && /\d/.test(match[1])) {
+        const candidate = match[1].trim();
+        if (!/^\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4}$/.test(candidate)) {
+          invoiceNumber = candidate;
+          break;
+        }
+      }
+    }
+  }
 
-  let date = new Date().toISOString().split('T')[0];
-  for (const regex of dateRegexes) {
-    const match = cleanText.match(regex);
-    if (match && match[1]) {
-      date = match[1];
+  // 4. BÚSQUEDA DE FECHA
+  for (let i = 0; i < lines.length; i++) {
+    const dateMatch = lines[i].match(/(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{4})/);
+    if (dateMatch && dateMatch[1]) {
+      date = dateMatch[1];
       break;
     }
   }
 
-  // 3. EXTRAER IMPORTE TOTAL (Filtro anti-IBAN y códigos largos)
-  const totalRegexes = [
-    /(?:total\s*factura|total\s*a\s*pagar|importe\s*total|liquido\s*a\s*pagar|total\s*eur|total\s*€|total\s*doc|total\s*general)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i,
-    /(?:total|importe\s*cobrado|total\s*cobrado)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i
-  ];
-
-  let amount = 0;
-  for (const regex of totalRegexes) {
-    const match = cleanText.match(regex);
-    if (match && match[1]) {
-      const val = parseEuropeanNumber(match[1]);
-      if (val > 0 && val < 100000) {
-        amount = val;
-        break;
-      }
-    }
-  }
-
+  // RECONSTRUCCIÓN Y COHERENCIA MATEMÁTICA
   if (amount === 0) {
-    const candidates = cleanText.match(/(?:€|\b)\s*([\d]{1,5}[,\.]\d{2})\s*(?:€|\b)/g);
-    if (candidates && candidates.length > 0) {
-      const parsedValues = candidates
-        .map(n => parseEuropeanNumber(n))
-        .filter(v => v > 0 && v < 50000);
-
-      if (parsedValues.length > 0) {
-        amount = Math.max(...parsedValues);
+    // Si no se encontró por línea, tomar el valor más alto con formato decimal del documento
+    const allNumbers = rawText.match(/(?:€|\b)\s*([\d]{1,6}[,\.]\d{2})\s*(?:€|\b)/g);
+    if (allNumbers && allNumbers.length > 0) {
+      const validNumbers = allNumbers.map(n => parseEuropeanNumber(n)).filter(v => v > 0 && v < 50000);
+      if (validNumbers.length > 0) {
+        amount = Math.max(...validNumbers);
       }
     }
   }
 
-  // 4. EXTRAER BASE IMPONIBLE
-  const baseRegex = /(?:base\s*imponible|subtotal|b\.i\.|base\s*imp\.|base)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i;
-  const baseMatch = cleanText.match(baseRegex);
-  let baseAmount = baseMatch ? parseEuropeanNumber(baseMatch[1]) : 0;
-
-  // 5. EXTRAER CUOTA DE IVA
-  const ivaRegex = /(?:cuota\s*iva|importe\s*iva|iva\s*\d{1,2}%|iva)\s*[:\.]?\s*[$€£]?\s*([\d\.,]{1,12})/i;
-  const ivaMatch = cleanText.match(ivaRegex);
-  let ivaAmount = ivaMatch ? parseEuropeanNumber(ivaMatch[1]) : 0;
-
-  // COHERENCIA Y RECONSTRUCCIÓN MATEMÁTICA
   if (baseAmount === 0 && amount > 0) {
-    if (ivaAmount > 0 && ivaAmount < amount) {
-      baseAmount = amount - ivaAmount;
-    } else {
-      baseAmount = amount / 1.21;
-      ivaAmount = amount - baseAmount;
-    }
-  } else if (ivaAmount === 0 && amount > 0 && baseAmount > 0 && amount >= baseAmount) {
-    ivaAmount = amount - baseAmount;
-  }
-
-  if (baseAmount > amount && amount > 0) {
     baseAmount = amount / 1.21;
+    ivaAmount = amount - baseAmount;
+  } else if (baseAmount > 0 && amount > 0) {
     ivaAmount = amount - baseAmount;
   }
 
@@ -171,7 +167,7 @@ app.post('/api/parse-pdf', async (req, res) => {
       });
     }
 
-    const extractedData = parseInvoiceText(pdfData.text);
+    const extractedData = parseInvoiceText(pdfData.text, fileName || 'factura.pdf');
 
     return res.json({
       success: true,
